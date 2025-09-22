@@ -5,6 +5,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Random;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -12,12 +18,16 @@ public class AuthController {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final OtpRepository otpRepository;  // New repository for OTPs
 
     @Autowired
-    public AuthController(UserRepository userRepository, PasswordEncoder passwordEncoder) {
+    public AuthController(UserRepository userRepository, PasswordEncoder passwordEncoder, OtpRepository otpRepository) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
+        this.otpRepository = otpRepository;
     }
+
+    // ------------------ Existing Signup/Login ------------------
 
     // Regular User Signup
     @PostMapping("/signup")
@@ -27,7 +37,7 @@ public class AuthController {
         }
         
         user.setPassword(passwordEncoder.encode(user.getPassword()));
-        user.setRole("USER");  // Default role for regular users
+        user.setRole("USER");
         userRepository.save(user);
         return ResponseEntity.ok("User registered successfully");
     }
@@ -39,23 +49,82 @@ public class AuthController {
             return ResponseEntity.status(HttpStatus.CONFLICT).body("Email already exists");
         }
 
-        // Only set the role to ADMIN
         user.setPassword(passwordEncoder.encode(user.getPassword()));
-        user.setRole("ADMIN");  // Role set to "ADMIN" for admin users
+        user.setRole("ADMIN");
         userRepository.save(user);
         return ResponseEntity.ok("Admin registered successfully");
     }
 
-    // User Login
+    // Normal Login
     @PostMapping("/login")
-    public ResponseEntity<User> login(@RequestBody User loginRequest) {
+    public ResponseEntity<String> login(@RequestBody User loginRequest) {
         User user = userRepository.findByEmail(loginRequest.getEmail())
                 .orElseThrow(() -> new RuntimeException("User not found"));
         
         if (!passwordEncoder.matches(loginRequest.getPassword(), user.getPassword())) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
         }
         
-        return ResponseEntity.ok(user);
+        return ResponseEntity.ok("Login successful as " + user.getRole());
+    }
+
+    // ------------------ OTP Endpoints ------------------
+
+    // Send OTP
+    @PostMapping("/send-otp")
+    public ResponseEntity<?> sendOtp(@RequestBody Map<String, String> request) {
+        String email = request.get("email");
+        if(email == null || email.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Email is required"));
+        }
+
+        // Check if user exists
+        if(!userRepository.existsByEmail(email)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", "User not found"));
+        }
+
+        // Generate 6-digit OTP
+        String otpCode = String.format("%06d", new Random().nextInt(999999));
+
+        // Save OTP to database
+        Otp otp = new Otp();
+        otp.setEmail(email);
+        otp.setCode(otpCode);
+        otp.setExpiryTime(LocalDateTime.now().plusMinutes(5));
+        otpRepository.save(otp);
+
+        // TODO: Replace this with actual email sending
+        System.out.println("OTP for " + email + ": " + otpCode);
+
+        return ResponseEntity.ok(Map.of("message", "OTP sent successfully"));
+    }
+
+    // Verify OTP
+    @PostMapping("/verify-otp")
+    @Transactional
+    public ResponseEntity<?> verifyOtp(@RequestBody Map<String, String> request) {
+        String email = request.get("email");
+        String code = request.get("otp");
+
+        Optional<Otp> otpOpt = otpRepository.findByEmailAndCode(email, code);
+        if(otpOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "Invalid OTP"));
+        }
+
+        Otp otp = otpOpt.get();
+        if(otp.getExpiryTime().isBefore(LocalDateTime.now())) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "OTP expired"));
+        }
+
+        // Delete OTP after successful verification
+        otpRepository.deleteByEmail(email);
+
+        // Generate simple token (for demo purposes)
+        String token = UUID.randomUUID().toString();
+
+        return ResponseEntity.ok(Map.of("message", "OTP verified", "token", token));
     }
 }
